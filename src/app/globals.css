@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    @apply bg-sky-deep text-chalk font-sans antialiased;
+    overflow-x: hidden;
+  }
+
+  /* The private world sets this to flip the ground colour. */
+  body[data-world="app"],
+  [data-world="app"] {
+    @apply bg-plum-900;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+  }
+
+  ::selection { background: #d7ff3e; color: #070c24; }
+
+  :focus-visible {
+    outline: 3px solid #d7ff3e;
+    outline-offset: 3px;
+    border-radius: 999px;
+  }
+}
+
+@layer components {
+  /* ── Type ─────────────────────────────────────────────── */
+  .display {
+    @apply font-display font-extrabold uppercase;
+  }
+
+  /* ── The white pill nav from both reference pages ─────── */
+  .pill-nav {
+    @apply inline-flex items-center rounded-full bg-white px-5 py-2.5 font-display
+           text-[13px] font-semibold text-sky-deep shadow-pill transition-transform duration-200;
+  }
+  .pill-nav:hover { @apply -translate-y-0.5; }
+
+  .pill-nav-ghost {
+    @apply inline-flex items-center rounded-full border border-white/55 px-5 py-2.5
+           font-display text-[13px] font-semibold text-white transition-colors duration-200;
+  }
+  .pill-nav-ghost:hover { @apply bg-white/15; }
+
+  /* ── Buttons ──────────────────────────────────────────── */
+  .btn {
+    @apply relative inline-flex items-center justify-center gap-2 overflow-hidden rounded-full
+           px-8 py-4 font-display text-[14px] font-bold transition-all duration-300;
+  }
+  .btn-lime   { @apply btn bg-lime text-sky-deep; }
+  .btn-lime:hover { @apply -translate-y-0.5 bg-lime-bright; }
+  .btn-hot    { @apply btn bg-hot-wash text-white shadow-glow-hot; }
+  .btn-hot:hover { @apply -translate-y-0.5; }
+  .btn-white  { @apply btn bg-white text-sky-deep; }
+  .btn-white:hover { @apply -translate-y-0.5; }
+  .btn-outline {
+    @apply btn border-2 border-white/60 text-white;
+  }
+  .btn-outline:hover { @apply border-white bg-white/10; }
+  .btn:disabled { @apply pointer-events-none opacity-40; }
+
+  /* Light sweep on hover. */
+  .sweep::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+    transform: translateX(-120%) skewX(-18deg);
+  }
+  .sweep:hover::after { animation: bn-sweep 0.9s ease-out; }
+  @keyframes bn-sweep {
+    0% { transform: translateX(-120%) skewX(-18deg); }
+    60%, 100% { transform: translateX(240%) skewX(-18deg); }
+  }
+
+  /* ── Full-bleed colour blocks (the carousel slides) ───── */
+  .block-card {
+    @apply relative overflow-hidden rounded-[32px] shadow-block;
+  }
+
+  /* ── Asset placeholders ───────────────────────────────── */
+  /* Sized and positioned for the 3D renders that replace them. Visible on
+     purpose: a silent empty box reads as a broken layout. */
+  .asset-slot {
+    @apply relative grid place-items-center rounded-[28px] border-2 border-dashed
+           border-white/25 bg-white/[0.06] text-center;
+  }
+  .asset-slot span {
+    @apply max-w-[22ch] px-4 font-mono text-[10px] uppercase leading-relaxed tracking-[0.18em] text-white/60;
+  }
+
+  /* ── Scroll reveal ────────────────────────────────────── */
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+                transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .js .reveal:not(.in) { opacity: 0; transform: translateY(28px); }
+
+  /* Word-by-word reveal used by the manifesto paragraph. */
+  .word { transition: color 0.35s ease; }
+}
+
+/* ── Landing intro ──────────────────────────────────────────
+   These live here, not in a styled-jsx block, because the intro
+   curtain is server-rendered: styled-jsx injects its CSS during
+   hydration, so keyframes declared there do not exist for the
+   first paint and the curtain would show blank for a beat. */
+@keyframes bn-intro-rise {
+  from { opacity: 0; transform: translateY(22px); filter: blur(6px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
+}
+@keyframes bn-intro-rule {
+  from { width: 0; }
+  to   { width: clamp(10rem, 22vw, 16rem); }
+}
+/* The exit is CSS too. Building the 3D scenes blocks the main thread for a
+   good while on first load, which delays any setTimeout — driven from JS the
+   curtain sat there long after its welcome. The compositor runs these
+   regardless, so the site opens on schedule. */
+@keyframes bn-intro-part-left {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
+}
+@keyframes bn-intro-part-right {
+  from { transform: translateX(0); }
+  to   { transform: translateX(100%); }
+}
+@keyframes bn-intro-dim {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .js .reveal:not(.in) { opacity: 1; transform: none; }
+}

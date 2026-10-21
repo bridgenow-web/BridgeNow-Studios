@@ -1,0 +1,374 @@
+// BridgeNow — dual-sided marketplace schema
+// Postgres (Supabase). Auth users live in Supabase's `auth.users`; `profiles.id`
+// is a 1:1 FK onto that. Everything app-side hangs off `profiles`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ──────────────────────────── Enums ────────────────────────────
+
+enum UserRole {
+  creator
+  brand
+  admin
+}
+
+enum CreatorTier {
+  creator_basic       // ₹49, bought once — not a subscription
+  creator_plus
+  creator_growth_pro
+  creator_elite
+  creator_premium
+}
+
+enum BrandTier {
+  brand_starter
+  brand_growth_plus
+  brand_premium
+  brand_custom
+}
+
+enum SubscriptionStatus {
+  pending       // mandate created, not yet authorized by the payer
+  active        // mandate authorized + first debit captured
+  grace_period  // debit failed or expired; service continues for GRACE_DAYS
+  expired       // grace elapsed — access revoked
+  cancelled     // user revoked the mandate
+  paused        // gateway/bank-side pause
+}
+
+enum BillingFrequency {
+  monthly
+  quarterly
+  yearly
+  /// One-off purchase. No mandate, no renewal, no pre-debit notice.
+  lifetime
+}
+
+enum PaymentStatus {
+  created
+  authorized
+  captured
+  failed
+  refunded
+}
+
+enum MandateStatus {
+  created
+  authorized
+  rejected
+  revoked
+  expired
+  paused
+}
+
+enum EmailKind {
+  account_created
+  welcome
+  pre_expiry_reminder
+  renewal_success
+  payment_failed
+  mandate_revoked
+}
+
+enum EmailStatus {
+  queued
+  sent
+  failed
+  skipped
+}
+
+enum CampaignStatus {
+  draft
+  live
+  paused
+  completed
+  archived
+}
+
+enum DealStatus {
+  invited
+  applied
+  shortlisted
+  accepted
+  delivered
+  paid
+  declined
+}
+
+// ─────────────────────────── Identity ──────────────────────────
+
+model Profile {
+  id        String   @id @db.Uuid // == auth.users.id
+  role      UserRole
+  email     String   @unique
+  fullName  String?  @map("full_name")
+  phone     String?
+  avatarUrl String?  @map("avatar_url")
+  onboardedAt DateTime? @map("onboarded_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  creator CreatorProfile?
+  brand   BrandProfile?
+
+  creatorSubscriptions CreatorSubscription[]
+  brandSubscriptions   BrandSubscription[]
+  payments             Payment[]
+  emailLogs            EmailLog[]
+
+  @@index([role])
+  @@map("profiles")
+}
+
+model CreatorProfile {
+  id             String  @id @default(uuid()) @db.Uuid
+  profileId      String  @unique @map("profile_id") @db.Uuid
+  instagramHandle String? @map("instagram_handle")
+  followerCount  Int?    @map("follower_count")
+  niches         String[]
+  city           String?
+  state          String?
+  languages      String[]
+  mediaKitUrl    String? @map("media_kit_url")
+  applicationSubmittedAt DateTime? @map("application_submitted_at")
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  deals   Deal[]
+
+  @@index([city])
+  @@index([followerCount])
+  @@map("creator_profiles")
+}
+
+model BrandProfile {
+  id          String  @id @default(uuid()) @db.Uuid
+  profileId   String  @unique @map("profile_id") @db.Uuid
+  companyName String  @map("company_name")
+  website     String?
+  industry    String?
+  gstin       String?
+  billingAddress Json? @map("billing_address")
+
+  profile   Profile    @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  campaigns Campaign[]
+
+  @@index([industry])
+  @@map("brand_profiles")
+}
+
+// ───────────────────── Subscriptions (dual) ────────────────────
+
+model CreatorSubscription {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tier      CreatorTier
+  status    SubscriptionStatus @default(pending)
+  billing   BillingFrequency   @default(monthly)
+
+  amountInPaise Int @map("amount_in_paise")
+  currency      String @default("INR")
+
+  // Gateway linkage
+  gatewayCustomerId     String? @map("gateway_customer_id")
+  gatewaySubscriptionId String? @unique @map("gateway_subscription_id")
+  upiMandateId          String? @unique @map("upi_mandate_id")
+  mandateStatus         MandateStatus? @map("mandate_status")
+  /// RBI E-Mandate Framework 2026: a mandate must carry a per-transaction cap…
+  mandateMaxAmountInPaise Int? @map("mandate_max_amount_in_paise")
+  /// …and an explicit validity period the customer can modify or cancel.
+  mandateValidUntil     DateTime? @map("mandate_valid_until")
+
+  startDate       DateTime  @map("start_date")
+  currentPeriodEnd DateTime @map("current_period_end")
+  nextBillingDate DateTime  @map("next_billing_date")
+  graceEndsAt     DateTime? @map("grace_ends_at")
+  cancelledAt     DateTime? @map("cancelled_at")
+
+  /// Guard against double-sending the 24h reminder on retries.
+  lastReminderSentFor DateTime? @map("last_reminder_sent_for")
+  /// Evidence timestamp for the pre-debit notification. The 24h floor is a
+  /// hard requirement — if this is null or <24h before the debit, abort.
+  preDebitNotifiedAt  DateTime? @map("pre_debit_notified_at")
+  /// Customer opted out of THIS cycle's debit (allowed during the 24h window).
+  cycleOptOutAt       DateTime? @map("cycle_opt_out_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  /// One live subscription per creator. Enforced by a partial unique index
+  /// in SQL (see 0001_init.sql) since Prisma can't express WHERE clauses here.
+  @@index([status, nextBillingDate])
+  @@index([userId, status])
+  @@index([upiMandateId])
+  @@map("creator_subscriptions")
+}
+
+model BrandSubscription {
+  id      String @id @default(uuid()) @db.Uuid
+  brandId String @map("brand_id") @db.Uuid
+  tier    BrandTier
+  status  SubscriptionStatus @default(pending)
+  billing BillingFrequency   @default(monthly)
+
+  amountInPaise Int    @map("amount_in_paise")
+  currency      String @default("INR")
+
+  // Tier quotas snapshotted at purchase time, so a later brochure change
+  // never silently downgrades someone mid-cycle. These mirror the units the
+  // brand brochure actually sells.
+  reelsSupportedMax     Int? @map("reels_supported_max")
+  scriptedReelsLimit    Int? @map("scripted_reels_limit")
+  editedReelsLimit      Int? @map("edited_reels_limit")
+  strategySessionsLimit Int? @map("strategy_sessions_limit")
+
+  gatewayCustomerId     String? @map("gateway_customer_id")
+  gatewaySubscriptionId String? @unique @map("gateway_subscription_id")
+  upiMandateId          String? @unique @map("upi_mandate_id")
+  mandateStatus         MandateStatus? @map("mandate_status")
+  mandateMaxAmountInPaise Int? @map("mandate_max_amount_in_paise")
+  mandateValidUntil     DateTime? @map("mandate_valid_until")
+
+  startDate        DateTime  @map("start_date")
+  currentPeriodEnd DateTime  @map("current_period_end")
+  nextBillingDate  DateTime  @map("next_billing_date")
+  renewalDate      DateTime? @map("renewal_date")
+  graceEndsAt      DateTime? @map("grace_ends_at")
+  cancelledAt      DateTime? @map("cancelled_at")
+
+  lastReminderSentFor DateTime? @map("last_reminder_sent_for")
+  preDebitNotifiedAt  DateTime? @map("pre_debit_notified_at")
+  cycleOptOutAt       DateTime? @map("cycle_opt_out_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  brand    Profile   @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([status, nextBillingDate])
+  @@index([brandId, status])
+  @@index([upiMandateId])
+  @@map("brand_subscriptions")
+}
+
+// ───────────────────────── Payments ────────────────────────────
+
+model Payment {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @map("user_id") @db.Uuid
+
+  creatorSubscriptionId String? @map("creator_subscription_id") @db.Uuid
+  brandSubscriptionId   String? @map("brand_subscription_id") @db.Uuid
+
+  gatewayPaymentId String  @unique @map("gateway_payment_id")
+  gatewayOrderId   String? @map("gateway_order_id")
+  amountInPaise    Int     @map("amount_in_paise")
+  currency         String  @default("INR")
+  status           PaymentStatus
+  method           String? // upi, card, netbanking
+  vpa              String? // payer UPI handle, when disclosed
+  failureReason    String? @map("failure_reason")
+  capturedAt       DateTime? @map("captured_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  user                Profile              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creatorSubscription CreatorSubscription? @relation(fields: [creatorSubscriptionId], references: [id])
+  brandSubscription   BrandSubscription?   @relation(fields: [brandSubscriptionId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("payments")
+}
+
+/// Append-only. The webhook handler writes here FIRST, then mutates state.
+/// `eventId` unique = idempotency: a replayed webhook is a no-op.
+model WebhookEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  provider   String   @default("razorpay")
+  eventId    String   @unique @map("event_id")
+  eventType  String   @map("event_type")
+  payload    Json
+  signature  String?
+  processedAt DateTime? @map("processed_at")
+  error      String?
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  @@index([eventType, receivedAt])
+  @@index([processedAt])
+  @@map("webhook_events")
+}
+
+model EmailLog {
+  id      String @id @default(uuid()) @db.Uuid
+  userId  String @map("user_id") @db.Uuid
+  kind    EmailKind
+  status  EmailStatus @default(queued)
+  /// Natural key preventing duplicates, e.g. "pre_expiry:<subId>:2026-11-19"
+  dedupeKey String @unique @map("dedupe_key")
+  toEmail   String @map("to_email")
+  providerMessageId String? @map("provider_message_id")
+  error     String?
+  sentAt    DateTime? @map("sent_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, kind])
+  @@index([status])
+  @@map("email_logs")
+}
+
+// ──────────────────── Marketplace (brand side) ─────────────────
+
+model Campaign {
+  id          String  @id @default(uuid()) @db.Uuid
+  brandId     String  @map("brand_id") @db.Uuid
+  title       String
+  brief       String?
+  status      CampaignStatus @default(draft)
+  budgetInPaise Int?  @map("budget_in_paise")
+  deliverables Json?
+  niches      String[]
+  cities      String[]
+  minFollowers Int?   @map("min_followers")
+  startsAt    DateTime? @map("starts_at")
+  endsAt      DateTime? @map("ends_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  brand BrandProfile @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  deals Deal[]
+
+  @@index([status, startsAt])
+  @@index([brandId, status])
+  @@map("campaigns")
+}
+
+model Deal {
+  id         String @id @default(uuid()) @db.Uuid
+  campaignId String @map("campaign_id") @db.Uuid
+  creatorId  String @map("creator_id") @db.Uuid
+  status     DealStatus @default(invited)
+  payoutInPaise Int? @map("payout_in_paise")
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  campaign Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  creator  CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, creatorId])
+  @@index([creatorId, status])
+  @@map("deals")
+}
